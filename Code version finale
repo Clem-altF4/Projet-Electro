@@ -1,0 +1,162 @@
+#include <Arduino.h>
+#include <RTClib.h>
+#include <MD_Parola.h>
+#include <MD_MAX72xx.h>
+#include <SPI.h>
+#include <Wire.h>
+
+#define HARDWARE_TYPE MD_MAX72XX::FC16_HW
+#define MAX_DEVICES 4
+#define CLK_PIN 3
+#define CS_PIN 4
+#define DATA_PIN 5
+
+#define LED_SECONDE 11
+#define LED_AM 10
+#define LED_PM 9
+#define REVEIL_BUZZER 6
+#define PM_AM_SWITCH 7
+#define REVEIL_BUTTON 2
+
+#define NOMBRE_TONE_REVEIL 6
+ 
+unsigned long previousMinuteEdit = 0;
+
+unsigned reveil = 1;
+unsigned long previousReveilEdit = 0;
+unsigned long previousReveilStart = 0;
+
+unsigned alarmTonalites[NOMBRE_TONE_REVEIL] = {100, 100, 200, 500, 100, 100};
+// Un temps sur deux est la durée du son, l'autre est le temps d'attente entre les sons
+unsigned alarmTemps[NOMBRE_TONE_REVEIL*2] = {100, 100, 100, 500, 100, 100, 100, 100, 100, 100, 100, 100};
+unsigned alarmToneIndex = 0;
+unsigned alarmTempsIndex = 0;
+unsigned long alarmPreviousMillis = 0;
+unsigned alarmState = 0;
+
+MD_Parola myDisplay = MD_Parola(HARDWARE_TYPE, DATA_PIN, CLK_PIN, CS_PIN, MAX_DEVICES);
+
+RTC_DS1307 RTC;
+
+DateTime reveilTime;
+
+void updateLedMatrix(DateTime time) {
+  char heure[10];
+
+  if (digitalRead(PM_AM_SWITCH) == HIGH) { 
+    if (time.isPM()) {
+      digitalWrite(LED_AM, LOW);
+      digitalWrite(LED_PM, HIGH);
+    } else {
+      digitalWrite(LED_AM, HIGH);
+      digitalWrite(LED_PM, LOW);
+    }
+
+    sprintf(heure, "%02d:%02d", time.twelveHour(), time.minute());
+  } else {
+    digitalWrite(LED_AM, LOW);
+    digitalWrite(LED_PM, LOW);
+    sprintf(heure, "%02d:%02d", time.hour(), time.minute());
+  }
+
+  Serial.println(heure);
+  myDisplay.print(heure);
+  previousMinuteEdit = millis();
+}
+
+void alarm(DateTime now, DateTime reveil) {
+  if (alarmState == 0 && now.hour() == reveil.hour() && now.minute() == reveil.minute()) {
+    Serial.println("Here2?");
+    tone(REVEIL_BUZZER, alarmTonalites[alarmToneIndex]);
+    alarmState = !alarmState;
+    alarmPreviousMillis = millis();
+    previousReveilStart = millis();
+  }
+
+  if (alarmState == 1 && millis() - alarmPreviousMillis >= alarmTemps[alarmTempsIndex]) {
+    Serial.println("Here3?");
+    if (alarmToneIndex*2 == alarmTempsIndex) {
+      noTone(REVEIL_BUZZER);
+    } else {
+      alarmToneIndex++;
+      tone(REVEIL_BUZZER, alarmTonalites[alarmToneIndex]);
+    }
+
+    if (alarmToneIndex == NOMBRE_TONE_REVEIL && alarmTempsIndex == NOMBRE_TONE_REVEIL*2) {
+      alarmToneIndex = 0;
+      alarmTempsIndex = 0;
+      alarmState = !alarmState;
+    }
+
+    alarmPreviousMillis = millis();
+    alarmTempsIndex++;
+  }
+}
+
+void toggleReveil() {
+  reveil = !reveil;
+  Serial.println((reveil ? "Réveil allumé" : "Réveil éteint"));
+  if (reveil) {
+    reveilTime = DateTime(2023, 1, 8, 21, 35);
+  }
+}
+
+void setup () {
+  Serial.begin(2400);
+  Wire.begin();
+  RTC.begin();
+
+  if (!RTC.isrunning()) {
+    Serial.println("RTC is NOT running!");
+    // following line sets the RTC to the date & time this sketch was compiled
+    RTC.adjust(DateTime(__DATE__, __TIME__));
+  }
+
+  previousMinuteEdit = millis();
+
+  pinMode(LED_SECONDE, OUTPUT);
+  pinMode(LED_AM, OUTPUT);
+  pinMode(LED_PM, OUTPUT);
+  pinMode(PM_AM_SWITCH, INPUT);
+  pinMode(REVEIL_BUTTON, INPUT);
+  pinMode(REVEIL_BUZZER, OUTPUT);
+
+  attachInterrupt(digitalPinToInterrupt(REVEIL_BUTTON), toggleReveil, RISING);
+
+  cli();
+  TCCR1A = 0;
+  TCCR1B = _BV(WGM12) | _BV(CS12) | _BV(CS10); // horloge interne divisée par 1024
+  TIMSK1 = _BV(OCIE1A); // it sur comparateur
+  TCNT1 = 0;
+  OCR1A = (F_CPU / 1000 / 1024) * 500; // 500ms est une demi-période des secondes
+  sei();
+
+  myDisplay.begin();
+  myDisplay.setIntensity(0);
+  myDisplay.displayClear();
+  myDisplay.setTextAlignment(PA_CENTER);
+
+  updateLedMatrix(RTC.now());
+}
+
+ISR(TIMER1_COMPA_vect) {
+  // fait clignoter la led à 1/2 periode de 1s
+  digitalWrite(LED_SECONDE, !digitalRead(LED_SECONDE));
+}
+
+void loop () {
+  DateTime now = RTC.now();
+
+  if (millis() - previousMinuteEdit >= 20000) {
+    updateLedMatrix(now);
+  }
+
+  if (reveil) {
+    if (millis() - previousReveilStart >= 20000) {
+      reveil = !reveil;
+      previousReveilStart = 0;
+    } else {
+      alarm(now, reveilTime);
+    }
+  }
+}
